@@ -43,6 +43,7 @@ from mlflow.utils.validation import (
 )
 
 if TYPE_CHECKING:
+    import pandas  # pylint: disable=unused-import
     import matplotlib  # pylint: disable=unused-import
     import plotly  # pylint: disable=unused-import
     import numpy  # pylint: disable=unused-import
@@ -1385,6 +1386,104 @@ class MlflowClient:
 
             else:
                 raise TypeError("Unsupported image object type: '{}'".format(type(image)))
+
+    def log_table(
+        self,
+        run_id: str,
+        data: Union[Dict[str, Any], "pandas.DataFrame"],
+        artifact_file: str,
+    ) -> None:
+        """
+        Log a table to MLflow Tracking as a CSV artifact. If the artifact_file already exists
+        in the run, the data would be appended to the existing artifact_file.
+
+        :param run_id: String ID of the run.
+        :param data: Dictionary or pandas.DataFrame to log.
+        :param artifact_file: The run-relative artifact file path in posixpath format to which
+                                the table is saved (e.g. "dir/file.csv").
+        :return: None
+
+        .. test-code-block:: python
+            :caption: Dictionary Example
+
+            import mlflow
+            from mlflow import MlflowClient
+
+            table_dict = {
+                "inputs": ["What is MLflow?", "What is Databricks?"],
+                "outputs": ["MLflow is ...", "Databricks is ..."],
+                "toxicity": [0.0, 0.0],
+            }
+
+            client = MlflowClient()
+            run = client.create_run(experiment_id="0")
+            client.log_table(run.info.run_id, data=table_dict, artifact_file="qabot_eval_results.csv")
+
+        .. test-code-block:: python
+            :caption: Pandas DF Example
+
+            import mlflow
+            import pandas as pd
+            from mlflow import MlflowClient
+
+            table_dict = {
+                "inputs": ["What is MLflow?", "What is Databricks?"],
+                "outputs": ["MLflow is ...", "Databricks is ..."],
+                "toxicity": [0.0, 0.0],
+            }
+            df: pd.DataFrame = pd.DataFrame.from_dict(table_dict)
+
+            client = MlflowClient()
+            run = client.create_run(experiment_id="0")
+            client.log_table(run.info.run_id, data=df, artifact_file="qabot_eval_results.csv")
+
+        """
+        import pandas as pd
+
+        if isinstance(data, dict):
+            data = pd.DataFrame(data)
+
+        if not isinstance(data, pd.DataFrame):
+            raise MlflowException.INVALID_PARAMETER_VALUE(
+                "data must be a pandas.DataFrame or a dictionary"
+            )
+
+        existing_predictions = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifacts = [f.path for f in self.list_artifacts(run_id)]
+            if artifact_file in artifacts:
+                import mlflow
+
+                downloaded_artifact_path = mlflow.artifacts.download_artifacts(
+                    run_id=run_id, artifact_path=artifact_file, dst_path=tmpdir
+                )
+                existing_predictions = pd.read_csv(downloaded_artifact_path)
+                _logger.info(
+                    "Appending new inputs to already existing artifact "
+                    f"{artifact_file} for run {run_id}."
+                )
+            else:
+                _logger.info(f"Creating a new {artifact_file} for run {run_id}.")
+
+        with self._log_artifact_helper(run_id, artifact_file) as artifact_path:
+            if existing_predictions is not None:
+                data = pd.concat([existing_predictions, data], ignore_index=True)
+            data.to_csv(artifact_path, mode="a", index=False)
+
+        run = self.get_run(run_id)
+        TAG_NAME = "mlflow.loggedTables"
+        # Get the current value of the tag
+        import ast
+
+        # Update the tag here to be this format: [{"path":"llm_predictions","type":table},...]
+        current_tag_value = ast.literal_eval(run.data.tags.get(TAG_NAME, "[]"))
+
+        # Append the new + deduplicate the new value to the list
+        current_tag_value.append(artifact_file)
+        new_tag_value = list(set(current_tag_value))
+
+        # Set the tag with the updated list
+        self.set_tag(run_id, TAG_NAME, new_tag_value)
 
     def _record_logged_model(self, run_id, mlflow_model):
         """

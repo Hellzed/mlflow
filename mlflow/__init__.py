@@ -143,6 +143,7 @@ from mlflow.tracking.fluent import (
     log_dict,
     log_image,
     log_figure,
+    log_table,
     active_run,
     get_run,
     start_run,
